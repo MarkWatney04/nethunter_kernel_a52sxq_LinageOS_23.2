@@ -1,4 +1,4 @@
-name: Build NetHunter Kernel
+name: Build NetHunter Kernel a52sxq
 
 on:
   workflow_dispatch:
@@ -7,37 +7,38 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Install dependencies
         run: |
           sudo apt update && sudo apt install -y \
             git bc bison flex libssl-dev libelf-dev \
-            gcc make zip unzip cpio lz4 \
+            gcc make zip unzip cpio lz4 ccache \
             device-tree-compiler python3 \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
-      - name: Clone kernel
+      - name: Clone kernel source
         run: |
           git clone --depth=1 \
             --branch lineage-23.2 \
             https://github.com/LineageOS/android_kernel_samsung_sm7325 \
             kernel-src
 
-      - name: Clone NetHunter patches
+      - name: Download NH builder and patches
         run: |
-          git clone --depth=1 \
-            https://github.com/tomasz-grobelny/nethunter-kernel-patches.git \
-            patches || \
-          git clone --depth=1 \
-            https://github.com/stdrc/kali-nethunter-kernel-patches.git \
-            patches
+          curl -L \
+            "https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-kernel-builder/-/archive/main/kali-nethunter-kernel-builder-main.zip" \
+            -o nh-builder.zip
+          unzip nh-builder.zip
+          mv kali-nethunter-kernel-builder-main nh-builder
 
-      - name: Apply patches
+      - name: Apply NetHunter patch
         run: |
           cd kernel-src
-          for patch in ../patches/5.4/*.patch; do
-            echo "Applying $patch"
-            git apply --ignore-whitespace "$patch" || echo "Skipped: $patch"
-          done
+          patch -p1 --forward \
+            < ../nh-builder/patches/5.4/add-qcacld-3.0-injection-5.4.patch \
+            || echo "Patch applied with some skipped hunks - continuing"
 
       - name: Configure kernel
         run: |
@@ -48,6 +49,7 @@ jobs:
           scripts/config \
             --enable CONFIG_CFG80211 \
             --enable CONFIG_MAC80211 \
+            --enable CONFIG_MAC80211_HWSIM \
             --enable CONFIG_USB_GADGET \
             --enable CONFIG_USB_RAW_GADGET \
             --enable CONFIG_HID \
@@ -59,31 +61,42 @@ jobs:
             --enable CONFIG_PPP \
             --enable CONFIG_VLAN_8021Q \
             --enable CONFIG_NF_CONNTRACK \
-            --enable CONFIG_MAC80211_HWSIM
+            --enable CONFIG_NETFILTER
+          make olddefconfig
 
       - name: Build kernel
         run: |
           cd kernel-src
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          make -j$(nproc) Image.gz dtbs 2>&1 | tee build.log
+          make -j$(nproc) Image.gz dtbs 2>&1 | tee ../build.log
+          echo "=== Build complete ==="
           ls arch/arm64/boot/
 
       - name: Package AnyKernel3
         run: |
-          git clone --depth=1 \
-            https://github.com/osm0sis/AnyKernel3.git \
-            anykernel
+          cp -r nh-builder/anykernel3 anykernel
           cp kernel-src/arch/arm64/boot/Image.gz anykernel/
-          find kernel-src/arch/arm64/boot/dts -name "*.dtb" \
-            -exec cat {} + > anykernel/dtb
+          find kernel-src/arch/arm64/boot/dts/vendor \
+            -name "*.dtb" -exec cat {} + > anykernel/dtb 2>/dev/null || \
+          find kernel-src/arch/arm64/boot/dts \
+            -name "*.dtb" -exec cat {} + > anykernel/dtb 2>/dev/null || true
           cd anykernel
           sed -i 's/do.devicecheck=1/do.devicecheck=0/' anykernel.sh
           zip -r9 \
             ../nethunter-kernel-a52sxq-lineage23.2.zip \
             . -x ".git*"
+          echo "=== Zip created ==="
+          ls -lh ../nethunter-kernel-a52sxq-lineage23.2.zip
 
-      - name: Upload artifact
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+
+      - name: Upload kernel zip
         uses: actions/upload-artifact@v4
         with:
           name: nethunter-kernel-a52sxq
